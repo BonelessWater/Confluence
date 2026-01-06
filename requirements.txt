@@ -1,0 +1,13 @@
+pandas
+numpy
+polars
+matplotlib
+openai
+python-dotenv
+tqdm
+pyarrow
+xgboost
+yfinance
+scikit-learn
+torch
+joblib

@@ -1,1 +1,54 @@
-/data
+.claude
+
+# Python environment
+venv/
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data files
+data/*.parquet
+data/*.csv
+data/archive/
+data/trump-truth-social-archive/data/
+data/trump-truth-social-archive/data/*.parquet
+data/trump-truth-social-archive/data/*.csv
+data/trump-truth-social-archive/data/*.json
+
+# Model checkpoints and outputs
+*.pt
+*.pth
+*.h5
+*.pkl
+*.joblib
+
+# Old archived results
+output/archive_old_results/
+
+# Temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+NUL
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
