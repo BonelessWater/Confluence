@@ -37,6 +37,17 @@ data/trump-truth-social-archive/data/*.json
 # Old archived results
 output/archive_old_results/
 
+# Output files (generated, not tracked)
+output/*.csv
+output/*.png
+output/*.txt
+
+# Archived scripts
+scripts/archive/
+
+# HTML reports (generated, not tracked)
+*.html
+
 # Temporary files
 *.log
 *.tmp

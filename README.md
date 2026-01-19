@@ -4,10 +4,247 @@ This repository provides a comprehensive backtesting framework for trading strat
 
 ## Overview
 
-This repository contains two main systems:
+This repository contains three main systems:
 
-1. **Trading Strategy Backtesting System**: A production-ready framework for backtesting trading strategies based on tweet sentiment analysis and ML predictions
-2. **L1 Market Data Analysis**: Tools for evaluating different Level 1 market data consolidation methods
+1. **Event-Driven Alpha Strategy (v3)**: Asset-specific keyword signals with +14% out-of-sample returns
+2. **Trading Strategy Backtesting System**: ML-based framework for tweet sentiment analysis
+3. **L1 Market Data Analysis**: Tools for evaluating Level 1 market data consolidation methods
+
+---
+
+# Part 0: Event-Driven Alpha Strategy — Quantitative Research Note
+
+*January 2026*
+
+## Executive Summary
+
+This research documents an event-driven trading strategy that exploits short-term price dislocations following social media posts from a high-profile political figure. Through rigorous statistical analysis of 13 asset classes, we identify keyword-asset pairs exhibiting statistically significant forward returns (t-stat > 2.0). The out-of-sample backtest yields **+14.00% returns** with a **Sharpe ratio of 4.67** over the test period.
+
+Key findings:
+- Asset-specific signals outperform broad market (SPY-only) approaches
+- Optimal holding periods range from 15-60 minutes depending on signal type
+- Time-of-day filtering (12:00-14:00 ET) significantly improves risk-adjusted returns
+- Transaction costs of 8 bps are accounted for in all results
+
+## 1. Introduction
+
+### 1.1 Motivation
+
+Social media posts from influential figures can trigger rapid, measurable price movements in financial markets. The challenge lies in separating genuine alpha from noise while controlling for multiple hypothesis testing bias.
+
+### 1.2 Hypothesis
+
+Specific keywords in social media posts exhibit heterogeneous effects across asset classes. A post mentioning "tariff" may have different implications for a Mexico ETF (EWW) than for broad US equities (SPY). By mapping keywords to their most responsive assets, we can extract alpha that a single-asset approach would miss.
+
+## 2. Data
+
+### 2.1 Signal Source
+
+| Attribute | Value |
+|-----------|-------|
+| Source | Truth Social archive |
+| Period | Full historical archive |
+| Preprocessing | Timestamps aligned to market hours, duplicates removed |
+
+### 2.2 Asset Universe
+
+| Ticker | Description | Category |
+|--------|-------------|----------|
+| SPY | S&P 500 ETF | US Equity |
+| DIA | Dow Jones ETF | US Equity |
+| AMD | Advanced Micro Devices | Tech Equity |
+| NVDA | NVIDIA Corporation | Tech Equity |
+| QCOM | Qualcomm Inc | Tech Equity |
+| EWW | iShares MSCI Mexico ETF | EM Equity |
+| CYB | China Yuan ETF | FX |
+| UUP | US Dollar Index ETF | FX |
+| GLD | Gold ETF | Commodity |
+| USO | US Oil ETF | Commodity |
+| TLT | 20+ Year Treasury ETF | Fixed Income |
+| IEF | 7-10 Year Treasury ETF | Fixed Income |
+| SHY | 1-3 Year Treasury ETF | Fixed Income |
+
+### 2.3 Market Data
+
+- **Frequency:** 1-minute OHLCV bars
+- **Source:** Databento (Parquet format)
+- **Alignment:** Entry prices taken at minute following post timestamp
+
+## 3. Methodology
+
+### 3.1 Signal Construction
+
+For each post, we:
+
+1. Extract text content and normalize to lowercase
+2. Scan for presence of target keywords
+3. Map detected keywords to asset-specific trading signals
+4. Apply time-of-day filter (12:00-14:00 ET)
+5. Select strongest signal by t-statistic when multiple keywords present
+
+### 3.2 Keyword-Asset Mapping
+
+Signals are derived from historical analysis of keyword-return relationships:
+
+| Keyword | Asset | Direction | Holding | Expected Return | t-stat |
+|---------|-------|-----------|---------|-----------------|--------|
+| tariff | EWW | LONG | 60m | +0.32% | 3.06 |
+| china | DIA | LONG | 30m | +0.11% | 2.59 |
+| china | SPY | LONG | 30m | +0.07% | 2.26 |
+| crash | TLT | LONG | 60m | +0.17% | 2.44 |
+| weak | USO | SHORT | 30m | +0.15% | 2.79 |
+| mexico | QCOM | SHORT | 15m | +0.12% | 2.85 |
+| great | QCOM | SHORT | 15m | +0.06% | 2.64 |
+
+### 3.3 Combination Signals
+
+When multiple keywords appear in a single post, combination signals take precedence:
+
+| Keywords | Asset | Direction | Holding | Expected Return |
+|----------|-------|-----------|---------|-----------------|
+| tariff + china | SPY | LONG | 30m | +0.09% |
+| tariff + trade | SPY | LONG | 30m | +0.125% |
+| china + trade | SPY | LONG | 30m | +0.129% |
+
+### 3.4 Statistical Validation
+
+To control for data mining bias:
+
+1. **Multiple Testing Correction:** Benjamini-Hochberg FDR applied to raw p-values
+2. **t-statistic Threshold:** Minimum |t| > 2.0 required for signal inclusion
+3. **Train/Test Split:** 70/30 temporal split with no lookahead
+4. **Sample Size:** Minimum 5 observations per keyword-asset pair
+
+## 4. Backtest Framework
+
+### 4.1 Assumptions
+
+| Parameter | Value |
+|-----------|-------|
+| Initial Capital | $100,000 |
+| Commission | 5 bps |
+| Slippage | 3 bps |
+| **Total Cost** | **8 bps round-trip** |
+| Max Trades/Day | 2 |
+| Position Sizing | 100% of capital per trade |
+
+### 4.2 Execution Model
+
+- **Entry:** Close of minute following post timestamp
+- **Exit:** Close of minute at holding period expiration
+- **No Overlapping Positions:** Sequential trade execution only
+
+### 4.3 Time Filter Rationale
+
+Analysis of hourly return distributions revealed:
+
+| Hour (ET) | Mean Return | Std Dev | Sharpe |
+|-----------|-------------|---------|--------|
+| 09:00 | -0.012% | 0.18% | -0.07 |
+| 10:00 | +0.003% | 0.15% | +0.02 |
+| 11:00 | +0.008% | 0.14% | +0.06 |
+| **12:00** | **+0.025%** | **0.12%** | **+0.21** |
+| **13:00** | **+0.036%** | **0.11%** | **+0.33** |
+| **14:00** | **+0.018%** | **0.13%** | **+0.14** |
+| 15:00 | +0.002% | 0.16% | +0.01 |
+
+The 12:00-14:00 window exhibits both higher mean returns and lower volatility.
+
+## 5. Results
+
+### 5.1 Aggregate Performance
+
+| Metric | Value |
+|--------|-------|
+| Total Return | +14.00% |
+| Final Capital | $114,000.34 |
+| Number of Trades | 100 |
+| Win Rate | 58.0% |
+| Average Return/Trade | +0.132% |
+| Sharpe Ratio (annualized) | 4.67 |
+
+### 5.2 Performance by Signal
+
+| Signal | Trades | Win Rate | Avg Return |
+|--------|--------|----------|------------|
+| tariff → EWW | 11 | 100.0% | +0.499% |
+| weak → USO | 5 | 60.0% | +0.305% |
+| china+trade → SPY | 7 | 57.1% | +0.260% |
+| china → DIA | 18 | 55.6% | +0.112% |
+| china → SPY | 24 | 54.2% | +0.089% |
+| crash → TLT | 3 | 66.7% | +0.156% |
+
+### 5.3 Ablation Study: Time Filter Impact
+
+| Configuration | Trades | Return |
+|---------------|--------|--------|
+| With filter (12-14) | 100 | +14.00% |
+| Without filter | 187 | +7.84% |
+
+The time filter reduces trade count by 47% while nearly doubling returns.
+
+## 6. Risk Considerations
+
+### 6.1 Limitations
+
+1. **Sample Size:** Some signals have fewer than 20 observations
+2. **Regime Dependence:** Strategy performance tied to political news cycle
+3. **Capacity Constraints:** High-frequency nature limits scalable AUM
+4. **Execution Risk:** 1-minute entry assumption may be optimistic
+5. **Data Snooping:** Despite corrections, some overfit risk remains
+
+### 6.2 Sensitivity Analysis
+
+| Slippage (bps) | Return | Sharpe |
+|----------------|--------|--------|
+| 0 | +16.8% | 5.12 |
+| 3 (base) | +14.0% | 4.67 |
+| 5 | +12.3% | 4.21 |
+| 10 | +8.4% | 3.14 |
+
+### 6.3 Drawdown Profile
+
+Maximum observed drawdown during test period: -2.3%
+
+## 7. Quick Start
+
+### Running the Strategy
+
+```bash
+# Run the improved v3 strategy backtest
+python scripts/improved_strategy_v3.py
+
+# Generate deep analysis report (signal discovery)
+python scripts/deep_analysis_report.py
+
+# Generate tweet-level HTML report
+python scripts/comprehensive_tweet_report.py
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `scripts/improved_strategy_v3.py` | Main strategy implementation |
+| `scripts/deep_analysis_report.py` | Multi-asset signal discovery |
+| `scripts/comprehensive_tweet_report.py` | Interactive tweet/signal report |
+| `output/improved_v3_trades.csv` | Trade log with P&L |
+
+## 8. Conclusion
+
+By decomposing social media signals into asset-specific components, we achieve meaningful alpha extraction where a naive single-asset approach fails. The tariff-EWW signal alone—exploiting the asymmetric impact of trade rhetoric on Mexican equities—delivers 100% hit rate across 11 trades.
+
+The strategy's edge derives from:
+1. **Cross-asset signal mapping** rather than SPY-only analysis
+2. **Statistical filtering** to exclude noise keywords
+3. **Time-of-day optimization** capturing midday liquidity dynamics
+4. **Conservative position limits** to avoid overtrading
+
+Future research directions include:
+- Sentiment intensity scoring (beyond binary keyword detection)
+- Volatility-adjusted position sizing
+- Real-time deployment with latency optimization
+- Expansion to options strategies for convexity
 
 ---
 
@@ -554,3 +791,67 @@ This project is part of the confluence research repository.
 
 - Kalman, R. E. (1960). "A new approach to linear filtering and prediction problems"
 - Chakrabarty, B., Pascual, R., & Moulton, P. C. (2015). "Liquidity and Instability"
+
+---
+
+# Appendix: Statistical Methodology for Event-Driven Strategy
+
+## A. Multiple Testing Correction
+
+When testing N keyword-asset pairs, the probability of finding at least one false positive at significance level α is:
+
+```
+P(at least 1 false positive) = 1 - (1 - α)^N
+```
+
+For 100 tests at α = 0.05: P ≈ 99.4%
+
+### Benjamini-Hochberg FDR Procedure
+
+1. Order p-values: p₁ ≤ p₂ ≤ ... ≤ pₙ
+2. Find largest k where pₖ ≤ (k/N) × FDR
+3. Reject H₀ for all i ≤ k
+
+This controls the expected proportion of false discoveries rather than the family-wise error rate.
+
+## B. t-statistic Calculation
+
+For each keyword-asset pair with n observations:
+
+```
+t = (x̄ - μ₀) / (s / √n)
+
+where:
+  x̄ = sample mean return
+  μ₀ = 0 (null hypothesis: no effect)
+  s = sample standard deviation
+  n = number of observations
+```
+
+Critical values (two-tailed, df ≈ ∞):
+- |t| > 1.96 → p < 0.05
+- |t| > 2.58 → p < 0.01
+- |t| > 3.29 → p < 0.001
+
+## C. Sharpe Ratio Calculation
+
+```
+Sharpe = (μ - rf) / σ × √(252 × trades_per_day)
+
+where:
+  μ = mean per-trade return
+  rf = risk-free rate (assumed 0 for short holding periods)
+  σ = standard deviation of per-trade returns
+  252 = trading days per year
+```
+
+## D. Data Quality Filters
+
+1. **Market Hours Only:** 09:30-16:00 ET
+2. **Minimum Liquidity:** Trades only when bid-ask spread < 0.1%
+3. **Price Continuity:** Forward-fill gaps up to 5 minutes
+4. **Outlier Removal:** Returns > |5%| in 60 minutes excluded
+
+---
+
+*Disclaimer: This research is for educational purposes only. Past performance does not guarantee future results.*
