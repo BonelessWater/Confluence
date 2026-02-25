@@ -1,0 +1,9 @@
+SENTIMENT RESULTS
+============================================================
+
+method: sentiment
+total_return: 6.37%
+final_capital: 106371.5247
+num_trades: 55
+win_rate: 58.18%
+avg_return: 1.02%

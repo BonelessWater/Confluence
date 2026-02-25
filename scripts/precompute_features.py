@@ -6,71 +6,59 @@ import pandas as pd
 import numpy as np
 import sys
 import os
-from feature_engineering import FeatureEngineer
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.features.feature_engineer import FeatureEngineer
+from config.settings import TWEET_PARQUET, FEATURES_PARQUET, TICKERS, DATA_DIR
+import polars as pl
 
 # Configuration
-TWEET_PARQUET = r"C:\Users\domdd\Documents\GitHub\confluence\data\trump-truth-social-archive\data\truth_archive_with_embeddings.parquet"
-OUTPUT_PARQUET = r"C:\Users\domdd\Documents\GitHub\confluence\data\trump-truth-social-archive\data\truth_archive_with_features.parquet"
+TWEET_PARQUET_INPUT = TWEET_PARQUET
+OUTPUT_PARQUET = FEATURES_PARQUET
 
 def load_price_data_for_ticker(ticker: str, tweets_df: pd.DataFrame):
-    """Load and create synthetic 5-minute price data for a ticker."""
-    import yfinance as yf
-
-    start_date = tweets_df['created_at'].min()
-    end_date = tweets_df['created_at'].max()
-
-    print(f"Fetching data for {ticker} from {start_date} to {end_date}...")
-
-    stock = yf.Ticker(ticker)
-    daily_df = stock.history(start=start_date, end=end_date, interval='1d')
-
-    if daily_df.empty:
-        print(f"Warning: No data for {ticker}, using recent data")
-        daily_df = stock.history(period='2y', interval='1d')
-
-    print(f"Creating synthetic 5-minute bars...")
-    intraday_bars = []
-
-    for date, row in daily_df.iterrows():
-        market_open = pd.Timestamp(date.date()) + pd.Timedelta(hours=9, minutes=30)
-        num_bars = 78
-
-        open_price = row['Open']
-        close_price = row['Close']
-        high_price = row['High']
-        low_price = row['Low']
-        volume = row['Volume']
-
-        daily_return = (close_price - open_price) / open_price
-
-        np.random.seed(int(date.timestamp()))
-        returns = np.random.normal(daily_return / num_bars, 0.0001, num_bars)
-        returns = returns * (daily_return / returns.sum()) if returns.sum() != 0 else returns
-
-        prices = [open_price]
-        for ret in returns:
-            prices.append(prices[-1] * (1 + ret))
-
-        prices = np.array(prices)
-        prices = np.clip(prices, low_price, high_price)
-
-        for i in range(num_bars):
-            timestamp = market_open + pd.Timedelta(minutes=5*i)
-
-            bar = {
-                'timestamp': timestamp,
-                'open': prices[i],
-                'high': max(prices[i], prices[i+1]),
-                'low': min(prices[i], prices[i+1]),
-                'close': prices[i+1],
-                'volume': volume / num_bars
-            }
-            intraday_bars.append(bar)
-
-    intraday_df = pd.DataFrame(intraday_bars)
-    intraday_df.set_index('timestamp', inplace=True)
-
-    return intraday_df
+    """Load real price data from parquet file for a ticker."""
+    price_path = DATA_DIR / f'{ticker}.parquet'
+    
+    if not price_path.exists():
+        raise FileNotFoundError(
+            f"Price data not found for {ticker} at {price_path}\n"
+            f"Please provide market data parquet files in data/ directory."
+        )
+    
+    print(f"Loading {ticker} from {price_path}...")
+    price_pl = pl.read_parquet(price_path)
+    price_df = price_pl.to_pandas()
+    
+    # Handle timestamp column
+    if 'ts_event' in price_df.columns:
+        price_df['timestamp'] = pd.to_datetime(price_df['ts_event'])
+    elif 'timestamp' in price_df.columns:
+        price_df['timestamp'] = pd.to_datetime(price_df['timestamp'])
+    else:
+        raise ValueError(f"{ticker} parquet has no ts_event or timestamp column")
+    
+    # Convert UTC -> US/Eastern (naive) to match tweet created_at
+    if price_df['timestamp'].dt.tz is not None:
+        price_df['timestamp'] = (
+            price_df['timestamp']
+            .dt.tz_convert('US/Eastern')
+            .dt.tz_localize(None)
+        )
+    
+    price_df = price_df.set_index('timestamp').sort_index()
+    
+    # Filter to tweet date range (with buffer) to reduce memory
+    min_date = tweets_df['created_at'].min() - pd.Timedelta(days=60)
+    max_date = tweets_df['created_at'].max() + pd.Timedelta(days=1)
+    price_df = price_df[(price_df.index >= min_date) & (price_df.index <= max_date)]
+    
+    print(f"  Loaded {len(price_df):,} bars ({price_df.index.min()} to {price_df.index.max()})")
+    
+    return price_df
 
 
 def align_and_add_price_features(tweets_df: pd.DataFrame, price_df: pd.DataFrame, ticker: str, feature_engineer: FeatureEngineer):
@@ -122,9 +110,22 @@ def main():
 
     # Load tweet data
     print("\nLoading tweet data...")
-    tweets_df = pd.read_parquet(TWEET_PARQUET)
+    if not TWEET_PARQUET_INPUT.exists():
+        raise FileNotFoundError(
+            f"\nTweet data file not found: {TWEET_PARQUET_INPUT}\n"
+            "Please ensure the tweet data file exists.\n"
+            "Expected location: data/trump-truth-social-archive/data/truth_archive_with_embeddings.parquet"
+        )
+    
+    tweets_df = pd.read_parquet(TWEET_PARQUET_INPUT)
     tweets_df['created_at'] = pd.to_datetime(tweets_df['created_at'])
-    tweets_df['created_at'] = tweets_df['created_at'].dt.tz_localize(None)
+    # Strip timezone if present (convert to naive Eastern)
+    if tweets_df['created_at'].dt.tz is not None:
+        tweets_df['created_at'] = (
+            tweets_df['created_at']
+            .dt.tz_convert('US/Eastern')
+            .dt.tz_localize(None)
+        )
 
     print(f"Loaded {len(tweets_df)} tweets")
     print(f"Date range: {tweets_df['created_at'].min()} to {tweets_df['created_at'].max()}")
@@ -137,11 +138,16 @@ def main():
     tweet_features = feature_engineer.calculate_tweet_features(tweets_df)
 
     # Add ticker-specific price features
-    tickers = ['SPY', 'QQQ', 'DIA', 'IWM', 'TLT', 'GLD']
+    # Filter to tickers that have data files
+    available_tickers = [t for t in TICKERS if (DATA_DIR / f'{t}.parquet').exists()]
+    skipped_tickers = [t for t in TICKERS if t not in available_tickers]
+    if skipped_tickers:
+        print(f"\nSkipping tickers without data files: {skipped_tickers}")
+    print(f"Processing tickers: {available_tickers}")
 
     all_ticker_data = []
 
-    for ticker in tickers:
+    for ticker in available_tickers:
         # Load price data
         price_df = load_price_data_for_ticker(ticker, tweets_df)
 
@@ -160,7 +166,7 @@ def main():
     # For each ticker, merge tweet features
     final_data = []
 
-    for ticker in tickers:
+    for ticker in available_tickers:
         ticker_data = combined_features[combined_features['ticker'] == ticker].copy()
 
         # Merge tweet features
@@ -193,6 +199,8 @@ def main():
 
     # Save to parquet
     print(f"\nSaving to {OUTPUT_PARQUET}...")
+    # Ensure directory exists
+    OUTPUT_PARQUET.parent.mkdir(parents=True, exist_ok=True)
     final_df.to_parquet(OUTPUT_PARQUET, index=False)
 
     file_size_mb = os.path.getsize(OUTPUT_PARQUET) / (1024 * 1024)

@@ -1,0 +1,9 @@
+ENSEMBLE RESULTS
+============================================================
+
+method: ensemble
+total_return: 1.69%
+final_capital: 101685.7285
+num_trades: 387
+win_rate: 57.11%
+avg_return: 0.25%

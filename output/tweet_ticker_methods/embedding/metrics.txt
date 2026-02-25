@@ -1,0 +1,9 @@
+EMBEDDING RESULTS
+============================================================
+
+method: embedding
+total_return: 2.39%
+final_capital: 102387.7861
+num_trades: 33
+win_rate: 51.52%
+avg_return: 1.24%

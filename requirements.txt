@@ -11,3 +11,5 @@ yfinance
 scikit-learn
 torch
 joblib
+quantstats
+scipy

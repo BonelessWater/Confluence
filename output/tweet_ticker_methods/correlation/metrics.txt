@@ -1,0 +1,9 @@
+CORRELATION RESULTS
+============================================================
+
+method: correlation
+total_return: 8.38%
+final_capital: 108377.8994
+num_trades: 309
+win_rate: 55.66%
+avg_return: 0.29%

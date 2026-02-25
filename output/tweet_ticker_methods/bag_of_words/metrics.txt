@@ -1,0 +1,9 @@
+BAG_OF_WORDS RESULTS
+============================================================
+
+method: bag_of_words
+total_return: 3.01%
+final_capital: 103009.7725
+num_trades: 141
+win_rate: 56.03%
+avg_return: 0.31%

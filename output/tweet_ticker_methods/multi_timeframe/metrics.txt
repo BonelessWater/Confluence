@@ -1,0 +1,9 @@
+MULTI_TIMEFRAME RESULTS
+============================================================
+
+method: multi_timeframe
+total_return: 2.57%
+final_capital: 102571.6996
+num_trades: 19
+win_rate: 68.42%
+avg_return: 2.38%

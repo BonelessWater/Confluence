@@ -24,7 +24,7 @@ FEATURES_PARQUET = TWEET_DATA_DIR / "truth_archive_with_features.parquet"
 FEATURES_LAGGED_PARQUET = PROCESSED_DATA_DIR / "features_with_lags.parquet"
 
 # Trading parameters
-TICKERS = ['SPY', 'QQQ', 'DIA', 'IWM', 'TLT', 'GLD']
+TICKERS = ['AMD', 'CYB', 'DIA', 'EWW', 'GLD', 'IEF', 'NVDA', 'QCOM', 'SHY', 'SPY', 'TLT', 'USO', 'UUP']
 HOLDING_PERIOD_MINUTES = 5
 INITIAL_CAPITAL = 100000
 

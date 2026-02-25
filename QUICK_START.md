@@ -1,3 +1,6 @@
+> [!WARNING]
+> **DEPRECATED** — This guide references scripts (`quick_backtest.py`, `compare_models.py`) that no longer exist and configuration that has since changed. Use the [README.md](README.md) Quick Start section instead.
+
 # Quick Start Guide - Refactored Trading System
 
 ## 🚀 **Get Started in 5 Minutes**

@@ -1,3 +1,6 @@
+> [!WARNING]
+> **DEPRECATED** — This was an internal development log documenting the refactoring phases (Phase 1–9). All relevant architecture, bias-fix, and configuration information is now consolidated in [README.md](README.md) and [PIPELINE_README.md](PIPELINE_README.md). This file is kept for historical reference only.
+
 # Trading Backtest System - Implementation Summary
 
 ## 🎉 **ALL PHASES COMPLETED**

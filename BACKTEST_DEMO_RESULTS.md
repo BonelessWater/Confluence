@@ -1,3 +1,6 @@
+> [!WARNING]
+> **DEPRECATED** — These are demo results from synthetic data (January 2026) used to validate the backtesting infrastructure. The pipeline now runs on real tweet and market data. See [README.md](README.md) for current results and setup.
+
 # Backtesting Demo Results - Equity Curves
 
 ## Overview

@@ -256,10 +256,10 @@ class FeatureEngineer:
     def fill_missing_values(self, features: pd.DataFrame) -> pd.DataFrame:
         """Fill missing values with appropriate strategies."""
         # Forward fill first (use last known value)
-        features = features.fillna(method='ffill')
+        features = features.ffill()
 
         # Backward fill for any remaining NaNs at the start
-        features = features.fillna(method='bfill')
+        features = features.bfill()
 
         # Fill any remaining with 0
         features = features.fillna(0)
