@@ -62,43 +62,55 @@ def load_price_data_for_ticker(ticker: str, tweets_df: pd.DataFrame):
 
 
 def align_and_add_price_features(tweets_df: pd.DataFrame, price_df: pd.DataFrame, ticker: str, feature_engineer: FeatureEngineer):
-    """Align tweets with prices and add price features."""
-
-    print(f"\n{'='*80}")
-    print(f"Processing {ticker}")
-    print(f"{'='*80}")
+    """Align tweets with prices and add price features using vectorized operations."""
+    print(f"\nProcessing {ticker} (using vectorized merge_asof)...")
 
     # Calculate price features
     price_features = feature_engineer.calculate_price_features(price_df)
-
-    # Fill missing values
     price_features = feature_engineer.fill_missing_values(price_features)
 
-    aligned_features = []
+    # Reset index for price features to have 'timestamp' as a column
+    price_features = price_features.reset_index()
 
-    for idx, tweet in tweets_df.iterrows():
-        tweet_time = tweet['created_at']
+    # Prepare tweets dataframe
+    tweets_sorted = tweets_df[['created_at']].copy()
+    tweets_sorted['tweet_idx'] = tweets_sorted.index
+    tweets_sorted = tweets_sorted.sort_values('created_at')
+    
+    # Sort price features
+    price_features = price_features.sort_values('timestamp')
 
-        # Find closest price bar
-        future_bars = price_df[price_df.index >= tweet_time]
+    # Merge asof to find closest price bar (first bar >= tweet_time)
+    aligned_df = pd.merge_asof(
+        tweets_sorted,
+        price_features,
+        left_on='created_at',
+        right_on='timestamp',
+        direction='forward'
+    )
+    
+    # Drop rows where timestamp is NaT (tweet is later than available market data)
+    aligned_df = aligned_df.dropna(subset=['timestamp'])
 
-        if len(future_bars) == 0:
-            continue
+    aligned_df['ticker'] = ticker
+    aligned_df = aligned_df.rename(columns={'timestamp': 'entry_time'})
+    aligned_df = aligned_df.drop(columns=['created_at'])
 
-        entry_bar_time = future_bars.index[0]
-
-        # Get price features at this time
-        if entry_bar_time in price_features.index:
-            features_dict = price_features.loc[entry_bar_time].to_dict()
-            features_dict['tweet_idx'] = idx
-            features_dict['ticker'] = ticker
-            features_dict['entry_time'] = entry_bar_time
-            aligned_features.append(features_dict)
-
-    aligned_df = pd.DataFrame(aligned_features)
-    print(f"Aligned {len(aligned_df)} tweets with price features")
-
+    print(f"Aligned {len(aligned_df)} tweets with price features for {ticker}")
     return aligned_df
+
+
+def process_single_ticker(ticker_data):
+    """Helper function to process a single ticker in parallel."""
+    ticker, tweets_df = ticker_data
+    try:
+        price_df = load_price_data_for_ticker(ticker, tweets_df)
+        feature_engineer = FeatureEngineer()
+        ticker_features = align_and_add_price_features(tweets_df, price_df, ticker, feature_engineer)
+        return ticker_features
+    except Exception as e:
+        print(f"Error processing {ticker}: {e}")
+        return pd.DataFrame()
 
 
 def main():
@@ -145,54 +157,49 @@ def main():
         print(f"\nSkipping tickers without data files: {skipped_tickers}")
     print(f"Processing tickers: {available_tickers}")
 
+    # Parallel processing of tickers
     all_ticker_data = []
+    
+    import concurrent.futures
+    import multiprocessing
+    max_workers = min(len(available_tickers), multiprocessing.cpu_count() or 4)
+    print(f"\nProcessing {len(available_tickers)} tickers in parallel using {max_workers} cores...")
 
-    for ticker in available_tickers:
-        # Load price data
-        price_df = load_price_data_for_ticker(ticker, tweets_df)
-
-        # Align and calculate features
-        ticker_features = align_and_add_price_features(tweets_df, price_df, ticker, feature_engineer)
-
-        all_ticker_data.append(ticker_features)
+    ticker_args = [(t, tweets_df) for t in available_tickers]
+    
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_single_ticker, args): args[0] for args in ticker_args}
+        for future in concurrent.futures.as_completed(futures):
+            ticker_features = future.result()
+            if not ticker_features.empty:
+                all_ticker_data.append(ticker_features)
 
     # Combine all ticker data
     print("\nCombining all ticker features...")
+    if not all_ticker_data:
+        raise ValueError("No ticker features could be calculated")
     combined_features = pd.concat(all_ticker_data, ignore_index=True)
 
     # Merge with original tweet data
     print("Merging with original tweet data...")
 
-    # For each ticker, merge tweet features
-    final_data = []
+    # Prepare tweet features with prefixed names
+    tweet_features_prefixed = tweet_features.copy()
+    tweet_features_prefixed.columns = [f'tweet_{col}' for col in tweet_features_prefixed.columns]
+    
+    # Prepare enriched tweets dataframe (original metadata + computed tweet features)
+    enriched_tweets = tweets_df[['id', 'created_at', 'content', 'url']].copy()
+    enriched_tweets = enriched_tweets.rename(columns={
+        'id': 'tweet_id', 
+        'created_at': 'tweet_time', 
+        'content': 'tweet_content', 
+        'url': 'tweet_url'
+    })
+    enriched_tweets = pd.concat([enriched_tweets, tweet_features_prefixed], axis=1)
+    enriched_tweets['tweet_idx'] = enriched_tweets.index
 
-    for ticker in available_tickers:
-        ticker_data = combined_features[combined_features['ticker'] == ticker].copy()
-
-        # Merge tweet features
-        for idx, row in ticker_data.iterrows():
-            tweet_idx = int(row['tweet_idx'])
-
-            # Get original tweet data
-            original_tweet = tweets_df.iloc[tweet_idx]
-
-            # Combine
-            combined_row = row.to_dict()
-
-            # Add tweet-specific features
-            tweet_feat_row = tweet_features.iloc[tweet_idx]
-            for col in tweet_feat_row.index:
-                combined_row[f'tweet_{col}'] = tweet_feat_row[col]
-
-            # Add original tweet metadata (non-redundant)
-            combined_row['tweet_id'] = original_tweet['id']
-            combined_row['tweet_time'] = original_tweet['created_at']
-            combined_row['tweet_content'] = original_tweet['content']
-            combined_row['tweet_url'] = original_tweet['url']
-
-            final_data.append(combined_row)
-
-    final_df = pd.DataFrame(final_data)
+    # Vectorized merge
+    final_df = combined_features.merge(enriched_tweets, on='tweet_idx', how='inner')
 
     print(f"\nFinal dataset shape: {final_df.shape}")
     print(f"Total features: {len(final_df.columns)}")

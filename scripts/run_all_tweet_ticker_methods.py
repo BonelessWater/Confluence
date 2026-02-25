@@ -226,8 +226,13 @@ def load_data():
 
 
 def calculate_forward_returns(tweets_df: pd.DataFrame, price_data: Dict) -> pd.DataFrame:
-    """Calculate forward returns for all tickers."""
-    returns_data = []
+    """Calculate forward returns for all tickers using high-performance vector operations."""
+    print(f"  Calculating forward returns for {len(tweets_df)} tweets across {len(price_data)} tickers...")
+    
+    # Sort tweets by time for merge_asof
+    tweets_sorted = tweets_df.sort_values('entry_time').copy()
+    all_returns = []
+
     horizons = [5, 15, 30, 60]
 
     for ticker in TICKERS:
@@ -238,44 +243,49 @@ def calculate_forward_returns(tweets_df: pd.DataFrame, price_data: Dict) -> pd.D
         if 'close' not in price_df.columns:
             continue
 
-        ticker_tweets = tweets_df[tweets_df['ticker'] == ticker].copy()
+        # Prepare price data for merge_asof (must be sorted by key)
+        price_df = price_df.sort_index()
         
-        for _, row in ticker_tweets.iterrows():
-            entry_time = row['entry_time']
+        # Filter tweets for this ticker
+        ticker_tweets = tweets_sorted[tweets_sorted['ticker'] == ticker].copy()
+        if ticker_tweets.empty:
+            continue
             
-            # Find entry price
-            if entry_time in price_df.index:
-                entry_price = price_df.loc[entry_time, 'close']
-            else:
-                # Find nearest
-                future_prices = price_df[price_df.index >= entry_time]
-                if len(future_prices) > 0:
-                    entry_price = future_prices.iloc[0]['close']
-                else:
-                    continue
+        # Match entry prices
+        # merge_asof matches on 'entry_time' to the nearest 'index' in price_df
+        temp_df = pd.merge_asof(
+            ticker_tweets[['tweet_id', 'entry_time']],
+            price_df[['close']],
+            left_on='entry_time',
+            right_index=True,
+            direction='forward'  # Match the same or next available price
+        )
+        temp_df.rename(columns={'close': 'entry_price'}, inplace=True)
 
-            return_row = {'tweet_id': row['tweet_id']}
+        # Calculate exit prices for each horizon
+        for horizon in horizons:
+            exit_col = f'exit_price_{horizon}m'
+            ticker_tweets[f'exit_time_{horizon}m'] = ticker_tweets['entry_time'] + pd.Timedelta(minutes=horizon)
+            
+            # Match exit prices
+            matched_exit = pd.merge_asof(
+                ticker_tweets[[f'exit_time_{horizon}m']],
+                price_df[['close']],
+                left_on=f'exit_time_{horizon}m',
+                right_index=True,
+                direction='forward'
+            )
+            
+            temp_df[f'{ticker}_{horizon}m'] = (matched_exit['close'] - temp_df['entry_price']) / temp_df['entry_price']
+            # Fill NaNs where price wasn't found (e.g., end of data)
+            temp_df[f'{ticker}_{horizon}m'] = temp_df[f'{ticker}_{horizon}m'].fillna(0.0)
 
-            # Calculate returns at different horizons
-            for horizon_minutes in horizons:
-                exit_time = entry_time + pd.Timedelta(minutes=horizon_minutes)
-                
-                if exit_time in price_df.index:
-                    exit_price = price_df.loc[exit_time, 'close']
-                else:
-                    # Find nearest
-                    future_prices = price_df[price_df.index >= exit_time]
-                    if len(future_prices) > 0:
-                        exit_price = future_prices.iloc[0]['close']
-                    else:
-                        exit_price = entry_price  # No exit price available
+        all_returns.append(temp_df.drop(columns=['entry_time', 'entry_price']))
 
-                forward_return = (exit_price - entry_price) / entry_price if entry_price > 0 else 0.0
-                return_row[f'{ticker}_{horizon_minutes}m'] = forward_return
+    if not all_returns:
+        return pd.DataFrame()
 
-            returns_data.append(return_row)
-
-    returns_df = pd.DataFrame(returns_data)
+    returns_df = pd.concat(all_returns, ignore_index=True)
     return returns_df
 
 

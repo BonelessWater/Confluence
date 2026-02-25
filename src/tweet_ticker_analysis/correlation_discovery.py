@@ -13,6 +13,43 @@ from sklearn.feature_selection import mutual_info_regression
 import warnings
 warnings.filterwarnings('ignore')
 
+from joblib import Parallel, delayed
+import os
+
+def _compute_feature_stats(feature: str, feature_vals: np.ndarray, ret_vals: np.ndarray) -> Tuple[str, Optional[Dict]]:
+    """Helper function to compute correlation and mutual information in parallel."""
+    # Remove NaN
+    mask = ~(np.isnan(feature_vals) | np.isnan(ret_vals))
+    if mask.sum() < 10:
+        return feature, None
+
+    f_vals = feature_vals[mask]
+    r_vals = ret_vals[mask]
+
+    # Pearson correlation
+    if len(f_vals) > 1 and f_vals.std() > 0:
+        corr, p_value = stats.pearsonr(f_vals, r_vals)
+    else:
+        corr, p_value = 0.0, 1.0
+
+    # Mutual information
+    try:
+        mi_score = mutual_info_regression(
+            f_vals.reshape(-1, 1),
+            r_vals,
+            random_state=42
+        )[0]
+    except:
+        mi_score = 0.0
+
+    return feature, {
+        'correlation': corr,
+        'p_value': p_value,
+        'mutual_info': float(mi_score),
+        'n_samples': len(f_vals)
+    }
+
+
 
 class CorrelationDiscovery:
     """
@@ -140,44 +177,24 @@ class CorrelationDiscovery:
                 continue
 
             ticker_results = {}
+            
+            # Extract numpy arrays for parallel processing to avoid DataFrame pickling overhead
+            ret_vals_all = aligned_df[ret_col].values
+            feature_data = [
+                (f, aligned_df[f].values, ret_vals_all) for f in feature_cols if f in aligned_df.columns
+            ]
 
-            for feature in feature_cols:
-                if feature not in aligned_df.columns:
-                    continue
+            print(f"  Analyzing {len(feature_data)} features for {ticker} using parallel processing...")
+            n_jobs = min(os.cpu_count() or 4, 32) # Scale to available cores (user has 25)
+            
+            parallel_results = Parallel(n_jobs=n_jobs)(
+                delayed(_compute_feature_stats)(feat, f_vals, r_vals) 
+                for feat, f_vals, r_vals in feature_data
+            )
 
-                feature_values = aligned_df[feature].values
-                returns = aligned_df[ret_col].values
-
-                # Remove NaN
-                mask = ~(np.isnan(feature_values) | np.isnan(returns))
-                if mask.sum() < 10:
-                    continue
-
-                feature_vals = feature_values[mask]
-                ret_vals = returns[mask]
-
-                # Pearson correlation
-                if len(feature_vals) > 1 and feature_vals.std() > 0:
-                    corr, p_value = stats.pearsonr(feature_vals, ret_vals)
-                else:
-                    corr, p_value = 0.0, 1.0
-
-                # Mutual information (non-linear relationships)
-                try:
-                    mi_score = mutual_info_regression(
-                        feature_vals.reshape(-1, 1),
-                        ret_vals,
-                        random_state=42
-                    )[0]
-                except:
-                    mi_score = 0.0
-
-                ticker_results[feature] = {
-                    'correlation': corr,
-                    'p_value': p_value,
-                    'mutual_info': mi_score,
-                    'n_samples': len(feature_vals)
-                }
+            for feature, res in parallel_results:
+                if res is not None:
+                    ticker_results[feature] = res
 
             # Filter by statistical significance and minimum correlation (avoid noise)
             filtered_results = {
