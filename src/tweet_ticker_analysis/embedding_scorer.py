@@ -11,7 +11,55 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import cross_val_score
 import warnings
+import warnings
 warnings.filterwarnings('ignore')
+
+from joblib import Parallel, delayed
+import os
+
+def _train_single_ticker_model(ticker: str, X: np.ndarray, y: np.ndarray, alpha: float, embedding_cols: List[str]) -> Tuple[str, Optional[Dict], Optional[Dict]]:
+    """Train single ticker regression mode in parallel."""
+    # Remove NaN
+    mask = ~(np.isnan(X).any(axis=1) | np.isnan(y))
+    X_clean = X[mask]
+    y_clean = y[mask]
+
+    if len(X_clean) < 20:
+        return ticker, None, None
+
+    # Train Ridge regression
+    model = Ridge(alpha=alpha, random_state=42)
+    model.fit(X_clean, y_clean)
+
+    # Cross-validation score
+    try:
+        cv_scores = cross_val_score(model, X_clean, y_clean, cv=5, scoring='r2')
+        cv_mean = cv_scores.mean()
+        cv_std = cv_scores.std()
+    except:
+        cv_mean = 0.0
+        cv_std = 0.0
+
+    # Predictions for evaluation
+    y_pred = model.predict(X_clean)
+    correlation = np.corrcoef(y_clean, y_pred)[0, 1] if len(y_clean) > 1 else 0.0
+
+    model_data = {
+        'model': model,
+        'embedding_cols': embedding_cols,
+        'cv_r2_mean': float(cv_mean),
+        'cv_r2_std': float(cv_std),
+        'n_samples': len(X_clean)
+    }
+
+    result_data = {
+        'cv_r2_mean': float(cv_mean),
+        'cv_r2_std': float(cv_std),
+        'correlation': float(correlation),
+        'n_samples': len(X_clean)
+    }
+
+    return ticker, model_data, result_data
 
 
 class EmbeddingScorer:
@@ -116,6 +164,8 @@ class EmbeddingScorer:
 
         results = {}
 
+        # Prepare data for parallel execution
+        ticker_data = []
         for ticker in tickers:
             ret_col = f'{ticker}_{return_horizon}'
             
@@ -144,52 +194,25 @@ class EmbeddingScorer:
             # Prepare features and targets
             X = aligned_df[embedding_cols].values
             y = aligned_df[ret_col].values
+            ticker_data.append((ticker, X, y))
+            
+        print(f"  Training Ridge regression models for {len(ticker_data)} tickers in parallel...")
+        n_jobs = min(os.cpu_count() or 4, 32)
+        
+        parallel_results = Parallel(n_jobs=n_jobs)(
+            delayed(_train_single_ticker_model)(ticker, X, y, self.alpha, embedding_cols)
+            for ticker, X, y in ticker_data
+        )
 
-            # Remove NaN
-            mask = ~(np.isnan(X).any(axis=1) | np.isnan(y))
-            X = X[mask]
-            y = y[mask]
-
-            if len(X) < 20:
-                continue
-
-            # Train Ridge regression
-            model = Ridge(alpha=self.alpha, random_state=42)
-            model.fit(X, y)
-
-            # Cross-validation score
-            try:
-                cv_scores = cross_val_score(model, X, y, cv=5, scoring='r2')
-                cv_mean = cv_scores.mean()
-                cv_std = cv_scores.std()
-            except:
-                cv_mean = 0.0
-                cv_std = 0.0
-
-            # Store model
-            self.models[ticker] = {
-                'model': model,
-                'embedding_cols': embedding_cols,
-                'cv_r2_mean': cv_mean,
-                'cv_r2_std': cv_std,
-                'n_samples': len(X)
-            }
-
-            # Predictions for evaluation
-            y_pred = model.predict(X)
-            correlation = np.corrcoef(y, y_pred)[0, 1] if len(y) > 1 else 0.0
-
-            results[ticker] = {
-                'cv_r2_mean': cv_mean,
-                'cv_r2_std': cv_std,
-                'correlation': correlation,
-                'n_samples': len(X)
-            }
-
-            print(f"\n  {ticker}:")
-            print(f"    Samples: {len(X)}")
-            print(f"    CV R²: {cv_mean:.4f} ± {cv_std:.4f}")
-            print(f"    Correlation: {correlation:.4f}")
+        for ticker, model_data, result_data in parallel_results:
+            if model_data is not None:
+                self.models[ticker] = model_data
+                results[ticker] = result_data
+                
+                print(f"\n  {ticker}:")
+                print(f"    Samples: {result_data['n_samples']}")
+                print(f"    CV R²: {result_data['cv_r2_mean']:.4f} ± {result_data['cv_r2_std']:.4f}")
+                print(f"    Correlation: {result_data['correlation']:.4f}")
 
         return results
 

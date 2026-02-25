@@ -19,6 +19,96 @@ from src.backtesting.return_calculator import RealReturnCalculator
 from src.backtesting.transaction_costs import TransactionCostCalculator
 from .market_regime import MarketRegimeDetector
 from .position_sizing import AdaptivePositionSizer
+from joblib import Parallel, delayed
+
+def _score_single_tweet_wrapper(idx, row, scorer, tickers, return_horizon, use_multi_timeframe, returns_df):
+    """Helper function to run tweet scoring in isolated parallel workers."""
+    scores = {}
+    signal_reasons = {}
+    for ticker in tickers:
+        try:
+            score_dict = {}
+            if isinstance(scorer, type):
+                score = 0.0
+            else:
+                # Score tweet-ticker pair
+                if use_multi_timeframe and returns_df is not None and hasattr(scorer, 'score_tweet_ticker'):
+                    try:
+                        score_dict = scorer.score_tweet_ticker(row, ticker, returns_df)
+                        score = score_dict.get('influence_score', 0.0)
+                    except Exception:
+                        try:
+                            score_dict = scorer.score_tweet_ticker(row, ticker, return_horizon=return_horizon)
+                            score = score_dict.get('influence_score', 0.0)
+                        except:
+                            score = 0.0
+                elif hasattr(scorer, 'score_tweet_ticker'):
+                    try:
+                        score_dict = scorer.score_tweet_ticker(row, ticker, return_horizon=return_horizon)
+                        score = score_dict.get('influence_score', 0.0)
+                    except TypeError:
+                        score_dict = scorer.score_tweet_ticker(row, ticker)
+                        score = score_dict.get('influence_score', 0.0)
+                elif hasattr(scorer, 'predict_tweet_ticker'):
+                    score = scorer.predict_tweet_ticker(row, ticker, return_horizon)
+                else:
+                    try:
+                        from .correlation_discovery import CorrelationDiscovery
+                        from .bag_of_words_scorer import BagOfWordsScorer
+                        from .embedding_scorer import EmbeddingScorer
+                        from .llm_scorer import LLMScorer
+                        from .ensemble_scorer import EnsembleScorer
+
+                        if isinstance(scorer, CorrelationDiscovery):
+                            score_dict = scorer.score_tweet_ticker(row, ticker, return_horizon)
+                            score = score_dict.get('influence_score', 0.0)
+                        elif isinstance(scorer, BagOfWordsScorer):
+                            tweet_text = row.get('tweet_content', '')
+                            if isinstance(tweet_text, pd.Series):
+                                tweet_text = tweet_text.iloc[0]
+                            if pd.notna(tweet_text):
+                                score_dict = scorer.score_tweet_ticker(str(tweet_text), ticker)
+                                score = score_dict.get('influence_score', 0.0)
+                            else:
+                                score = 0.0
+                        elif isinstance(scorer, EmbeddingScorer):
+                            score_dict = scorer.score_tweet_ticker(row, ticker, None, return_horizon)
+                            score = score_dict.get('influence_score', 0.0)
+                        elif isinstance(scorer, LLMScorer):
+                            tweet_text = row.get('tweet_content', '')
+                            if isinstance(tweet_text, pd.Series):
+                                tweet_text = tweet_text.iloc[0]
+                            if pd.notna(tweet_text):
+                                score_dict = scorer.score_tweet_ticker(str(tweet_text), ticker)
+                                score = score_dict.get('influence_score', 0.0)
+                            else:
+                                score = 0.0
+                        elif isinstance(scorer, EnsembleScorer):
+                            score_dict = scorer.score_tweet_ticker(row, ticker, None, return_horizon)
+                            score = score_dict.get('influence_score', 0.0)
+                        else:
+                            score = 0.0
+                        reason = _build_reason(scorer, score_dict, ticker)
+                    except Exception:
+                        score = 0.0
+                        reason = ''
+                    if 'reason' not in locals():
+                        reason = _build_reason(scorer, score_dict, ticker)
+                if 'reason' not in locals():
+                    reason = _build_reason(scorer, score_dict, ticker)
+            scores[ticker] = score
+            signal_reasons[ticker] = reason
+        except Exception as e:
+            scores[ticker] = 0.0
+            signal_reasons[ticker] = ''
+
+    # Store metadata for richer trade output
+    raw_content = row.get('tweet_content', '')
+    if isinstance(raw_content, pd.Series):
+        raw_content = raw_content.iloc[0]
+    snippet = str(raw_content)[:120] if pd.notna(raw_content) else ''
+    
+    return idx, scores, snippet, signal_reasons
 
 
 def _build_reason(scorer, score_dict: dict, ticker: str) -> str:
@@ -144,93 +234,27 @@ class TweetStrategyBacktester:
         # Sort tweets by time
         tweets_df = tweets_df.sort_values('entry_time').reset_index(drop=True)
 
-        # Score all tweets
+        # Score all tweets in parallel
         print("\nScoring tweets...")
-        tweet_scores = {}  # {idx: {ticker: score}}
-        tweet_meta = {}   # {idx: {'tweet_snippet': str, 'signal_reasons': {ticker: str}}}
+        
+        n_jobs = min(os.cpu_count() or 4, 32)
+        print(f"  Parallelizing inference loop across {len(tweets_df)} tweets using {n_jobs} cores...")
+        
+        # We process row objects individually. 
+        # For huge memory overhead improvement, chunking iterrows is better, but this solves the CPU bottleneck.
+        parallel_results = Parallel(n_jobs=n_jobs, batch_size='auto')(
+            delayed(_score_single_tweet_wrapper)(
+                idx, row, scorer, tickers, return_horizon, use_multi_timeframe, returns_df
+            )
+            for idx, row in tweets_df.iterrows()
+        )
 
-        for idx, row in tweets_df.iterrows():
-            scores = {}
-            signal_reasons = {}
-            for ticker in tickers:
-                try:
-                    score_dict = {}
-                    if isinstance(scorer, type):
-                        score = 0.0
-                    else:
-                        # Score tweet-ticker pair
-                        if use_multi_timeframe and returns_df is not None and hasattr(scorer, 'score_tweet_ticker'):
-                            try:
-                                score_dict = scorer.score_tweet_ticker(row, ticker, returns_df)
-                                score = score_dict.get('influence_score', 0.0)
-                            except Exception:
-                                try:
-                                    score_dict = scorer.score_tweet_ticker(row, ticker, return_horizon=return_horizon)
-                                    score = score_dict.get('influence_score', 0.0)
-                                except:
-                                    score = 0.0
-                        elif hasattr(scorer, 'score_tweet_ticker'):
-                            try:
-                                score_dict = scorer.score_tweet_ticker(row, ticker, return_horizon=return_horizon)
-                                score = score_dict.get('influence_score', 0.0)
-                            except TypeError:
-                                score_dict = scorer.score_tweet_ticker(row, ticker)
-                                score = score_dict.get('influence_score', 0.0)
-                        elif hasattr(scorer, 'predict_tweet_ticker'):
-                            score = scorer.predict_tweet_ticker(row, ticker, return_horizon)
-                        else:
-                            try:
-                                from .correlation_discovery import CorrelationDiscovery
-                                from .bag_of_words_scorer import BagOfWordsScorer
-                                from .embedding_scorer import EmbeddingScorer
-                                from .llm_scorer import LLMScorer
-                                from .ensemble_scorer import EnsembleScorer
+        tweet_scores = {}
+        tweet_meta = {}
 
-                                if isinstance(scorer, CorrelationDiscovery):
-                                    score_dict = scorer.score_tweet_ticker(row, ticker, return_horizon)
-                                    score = score_dict.get('influence_score', 0.0)
-                                elif isinstance(scorer, BagOfWordsScorer):
-                                    tweet_text = row.get('tweet_content', '')
-                                    if isinstance(tweet_text, pd.Series):
-                                        tweet_text = tweet_text.iloc[0]
-                                    if pd.notna(tweet_text):
-                                        score_dict = scorer.score_tweet_ticker(str(tweet_text), ticker)
-                                        score = score_dict.get('influence_score', 0.0)
-                                    else:
-                                        score = 0.0
-                                elif isinstance(scorer, EmbeddingScorer):
-                                    score_dict = scorer.score_tweet_ticker(row, ticker, None, return_horizon)
-                                    score = score_dict.get('influence_score', 0.0)
-                                elif isinstance(scorer, LLMScorer):
-                                    tweet_text = row.get('tweet_content', '')
-                                    if isinstance(tweet_text, pd.Series):
-                                        tweet_text = tweet_text.iloc[0]
-                                    if pd.notna(tweet_text):
-                                        score_dict = scorer.score_tweet_ticker(str(tweet_text), ticker)
-                                        score = score_dict.get('influence_score', 0.0)
-                                    else:
-                                        score = 0.0
-                                elif isinstance(scorer, EnsembleScorer):
-                                    score_dict = scorer.score_tweet_ticker(row, ticker, None, return_horizon)
-                                    score = score_dict.get('influence_score', 0.0)
-                                else:
-                                    score = 0.0
-                                reason = _build_reason(scorer, score_dict, ticker)
-                            except Exception:
-                                score = 0.0
-                    scores[ticker] = score
-                    signal_reasons[ticker] = _build_reason(scorer, score_dict, ticker)
-                except Exception as e:
-                    print(f"  Warning: Error scoring tweet {idx} for {ticker}: {e}")
-                    scores[ticker] = 0.0
-                    signal_reasons[ticker] = ''
-
+        for res in parallel_results:
+            idx, scores, snippet, signal_reasons = res
             tweet_scores[idx] = scores
-            # Store metadata for richer trade output
-            raw_content = row.get('tweet_content', '')
-            if isinstance(raw_content, pd.Series):
-                raw_content = raw_content.iloc[0]
-            snippet = str(raw_content)[:120] if pd.notna(raw_content) else ''
             tweet_meta[idx] = {'tweet_snippet': snippet, 'signal_reasons': signal_reasons}
 
         print(f"  Scored {len(tweet_scores)} tweets")

@@ -15,6 +15,54 @@ import re
 import warnings
 warnings.filterwarnings('ignore')
 
+from joblib import Parallel, delayed
+import os
+
+def _score_single_keyword(keyword: str, weights: np.ndarray, returns: np.ndarray,
+                          overall_mean: float, overall_std: float, 
+                          min_occurrences: int, p_value_threshold: float) -> Tuple[str, Optional[Dict]]:
+    mask = weights > 0
+    k_returns = returns[mask]
+    k_weights = weights[mask]
+
+    if len(k_returns) < min_occurrences:
+        return keyword, None
+
+    mean_return = k_returns.mean()
+    std_return = k_returns.std()
+    
+    if std_return > 0 and len(k_returns) >= 3:
+        t_stat, p_value = stats.ttest_1samp(k_returns, overall_mean)
+    else:
+        t_stat, p_value = 0.0, 1.0
+
+    if p_value > p_value_threshold:
+        return keyword, None
+
+    hit_rate = (k_returns > 0).mean()
+    excess_return = mean_return - overall_mean
+    vol_impact = std_return - overall_std if overall_std > 0 else 0.0
+    mean_tfidf = k_weights.mean()
+
+    if len(k_returns) >= 10 and k_weights.std() > 0:
+        ic, _ = stats.spearmanr(k_weights, k_returns)
+    else:
+        ic = 0.0
+
+    return keyword, {
+        'mean_return': mean_return,
+        'excess_return': excess_return,
+        'std_return': std_return,
+        't_stat': t_stat,
+        'p_value': p_value,
+        'hit_rate': hit_rate,
+        'vol_impact': vol_impact,
+        'n_occurrences': len(k_returns),
+        'mean_tfidf': mean_tfidf,
+        'information_coefficient': ic,
+        'direction': 'bullish' if excess_return > 0 else 'bearish',
+    }
+
 
 class BagOfWordsScorer:
     """
@@ -171,61 +219,27 @@ class BagOfWordsScorer:
 
             ticker_keyword_scores = {}
 
-            for keyword in self.vocabulary:
-                # Get tweets containing this keyword (TF-IDF > 0)
-                keyword_mask = aligned_df[keyword] > 0
-                keyword_returns = aligned_df.loc[keyword_mask, ret_col]
-                keyword_tfidf_weights = aligned_df.loc[keyword_mask, keyword]
+            returns_vals = aligned_df[ret_col].values
+            
+            # Prepare data for all keywords (using numpy arrays avoids pickling the whole dataframe)
+            kw_data = [
+                (kw, aligned_df[kw].values) for kw in self.vocabulary if kw in aligned_df.columns
+            ]
+            
+            print(f"  Analyzing {len(kw_data)} keywords for {ticker} using parallel processing...")
+            n_jobs = min(os.cpu_count() or 4, 32)
+            
+            parallel_results = Parallel(n_jobs=n_jobs)(
+                delayed(_score_single_keyword)(
+                    kw, weights, returns_vals, overall_mean, overall_std, min_occurrences, self.p_value_threshold
+                )
+                for kw, weights in kw_data
+            )
 
-                if len(keyword_returns) < min_occurrences:
-                    continue
-
-                # Calculate statistics
-                mean_return = keyword_returns.mean()
-                std_return = keyword_returns.std()
-                
-                # T-test: is the mean return when keyword present different from overall mean?
-                if std_return > 0 and len(keyword_returns) >= 3:
-                    t_stat, p_value = stats.ttest_1samp(keyword_returns, overall_mean)
-                else:
-                    t_stat, p_value = 0.0, 1.0
-
-                # ** P-value gate: skip noisy keywords **
-                if p_value > self.p_value_threshold:
-                    continue
-
-                hit_rate = (keyword_returns > 0).mean()
-                
-                # Excess return over baseline
-                excess_return = mean_return - overall_mean
-                
-                # Volatility impact
-                vol_impact = std_return - overall_std if overall_std > 0 else 0.0
-
-                # Mean TF-IDF weight (how strongly this keyword appears)
-                mean_tfidf = keyword_tfidf_weights.mean()
-
-                # Information coefficient: correlation between TF-IDF weight and return
-                if len(keyword_returns) >= 10 and keyword_tfidf_weights.std() > 0:
-                    ic, ic_pvalue = stats.spearmanr(keyword_tfidf_weights, keyword_returns)
-                else:
-                    ic, ic_pvalue = 0.0, 1.0
-
-                ticker_keyword_scores[keyword] = {
-                    'mean_return': mean_return,
-                    'excess_return': excess_return,
-                    'std_return': std_return,
-                    't_stat': t_stat,
-                    'p_value': p_value,
-                    'hit_rate': hit_rate,
-                    'vol_impact': vol_impact,
-                    'n_occurrences': len(keyword_returns),
-                    'mean_tfidf': mean_tfidf,
-                    'information_coefficient': ic,
-                    'direction': 'bullish' if excess_return > 0 else 'bearish',
-                }
-
-                self.keyword_scores[(keyword, ticker)] = ticker_keyword_scores[keyword]
+            for kw, res in parallel_results:
+                if res is not None:
+                    ticker_keyword_scores[kw] = res
+                    self.keyword_scores[(kw, ticker)] = res
 
             # ** Top-N selection: keep only the most significant keywords **
             sorted_keywords = sorted(
