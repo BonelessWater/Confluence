@@ -1,0 +1,3 @@
+Method,Trades,Win%,AvgRet%,AvgHold(min),TotalPnL($),TotalReturn%,AvgRelevance,GOOD%,SUSPECT%
+sentiment,564,50.9,0.2006,6963.4,100724.14,100.72,0.274,20.0,0.2
+correlation,215,52.1,0.3688,4888.1,49166.1,49.17,0.259,15.0,0.9

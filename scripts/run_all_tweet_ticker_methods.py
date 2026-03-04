@@ -40,6 +40,7 @@ from src.tweet_ticker_analysis.market_regime import MarketRegimeDetector, Market
 from src.tweet_ticker_analysis.position_sizing import PositionSizer, AdaptivePositionSizer
 from src.tweet_ticker_analysis.multi_timeframe_scorer import MultiTimeframeScorer
 from src.tweet_ticker_analysis.cross_asset_analyzer import CrossAssetAnalyzer
+from src.tweet_ticker_analysis.ticker_relevance_filter import TickerRelevanceFilter
 
 # Try to import quantstats
 try:
@@ -100,32 +101,64 @@ def load_data():
     print(f"  Loaded {len(tweets_df)} tweet-ticker pairs")
     print(f"  Unique tweets: {tweets_df['tweet_id'].nunique()}")
     print(f"  Tickers: {tweets_df['ticker'].unique()}")
-    
+
     # Clean tweets (remove HTML tags, etc.)
     print("\n" + "="*80)
     print("CLEANING TWEETS")
     print("="*80)
     cleaner = TweetCleaner()
     tweets_df = cleaner.clean_tweets(tweets_df, text_column='tweet_content')
-    
-    # Filter to most important tweets
+
+    # ── Robust ticker-relevance filtering ──────────────────────────────────
+    # Every unique tweet is replicated once per ticker in the features parquet.
+    # Most of those rows are irrelevant (e.g., election tweets tagged to AMD).
+    # This filter keeps only tweet-ticker pairs where the tweet actually
+    # discusses topics that could plausibly move the ticker.
     print("\n" + "="*80)
-    print("FILTERING IMPORTANT TWEETS")
+    print("FILTERING TWEETS BY TICKER RELEVANCE (robust filter)")
+    print("="*80)
+    relevance_filter = TickerRelevanceFilter(min_relevance_score=0.15)
+
+    before_filter = len(tweets_df)
+    coverage = relevance_filter.report_coverage(tweets_df)
+    print("\n  Coverage before filtering:")
+    print(coverage.to_string(index=False))
+
+    tweets_df = relevance_filter.filter_all_tickers(tweets_df)
+    after_filter = len(tweets_df)
+    print(f"\n  Rows before relevance filter : {before_filter:,}")
+    print(f"  Rows after  relevance filter : {after_filter:,}  "
+          f"({after_filter/max(1,before_filter)*100:.1f}% kept)")
+    print(f"  Unique tweets after filter   : {tweets_df['tweet_id'].nunique():,}")
+    print("\n  Per-ticker counts after relevance filter:")
+    print(tweets_df.groupby('ticker').size().to_string())
+
+    # Standard importance filter (engagement + length) — applied after relevance
+    print("\n" + "="*80)
+    print("FILTERING IMPORTANT TWEETS (engagement + length)")
     print("="*80)
     tweets_df = cleaner.filter_important_tweets(
-        tweets_df, 
-        top_percentile=0.4,  # Keep top 40% most important
+        tweets_df,
+        top_percentile=0.6,   # Keep top 60% (looser — relevance filter already reduced noise)
         min_score=None
     )
-    
+
     print(f"\nFinal dataset: {len(tweets_df)} tweet-ticker pairs")
 
-    # Load market data
-    print("\nLoading market data...")
+    # Load market data — discover all parquets in data/ automatically
+    print("\nLoading market data (scanning data/ for all parquets)...")
     price_data = {}
     missing_tickers = []
-    
-    for ticker in TICKERS:
+
+    # Discover all ticker parquets dynamically (not just from config.TICKERS)
+    discovered_parquets = sorted(DATA_DIR.glob('*.parquet'))
+    discovered_ticker_names = [p.stem for p in discovered_parquets]
+    # Also include config.TICKERS in case some are missing from scan
+    all_tickers_to_load = list(dict.fromkeys(discovered_ticker_names + TICKERS))
+    print(f"  Discovered price files: {discovered_ticker_names}")
+    print(f"  Will attempt to load  : {all_tickers_to_load}")
+
+    for ticker in all_tickers_to_load:
         price_path = DATA_DIR / f'{ticker}.parquet'
         if price_path.exists():
             try:
@@ -174,12 +207,10 @@ def load_data():
         else:
             print(f"  {ticker}: File not found")
             missing_tickers.append(ticker)
-    
+
     if len(missing_tickers) > 0:
-        print(f"\nWarning: Missing market data for {len(missing_tickers)} tickers: {missing_tickers}")
-        print("  The script will continue with available tickers.")
-        print("  Ensure market data files exist in: data/{TICKER}.parquet")
-    
+        print(f"\nNote: No price file for {missing_tickers} (these will be skipped).")
+
     if len(price_data) == 0:
         raise FileNotFoundError(
             "\nNo market data found!\n"
@@ -187,13 +218,16 @@ def load_data():
             f"Expected files: {[f'data/{t}.parquet' for t in TICKERS]}"
         )
 
-    # Filter to only tickers that have price data
-    available_tickers = [t for t in TICKERS if t in price_data]
-    print(f"\nAvailable tickers with market data: {available_tickers}")
-    if len(available_tickers) < len(TICKERS):
-        skipped = [t for t in TICKERS if t not in price_data]
-        print(f"  Skipping tickers without data: {skipped}")
-    
+    # Tickers that have BOTH tweet data and price data
+    tweet_tickers = set(tweets_df['ticker'].unique())
+    price_tickers = set(price_data.keys())
+    available_tickers = sorted(tweet_tickers & price_tickers)
+    price_only_tickers = sorted(price_tickers - tweet_tickers)
+
+    print(f"\nAvailable tickers (tweet data + price data): {available_tickers}")
+    if price_only_tickers:
+        print(f"  Price-data-only tickers (no tweet features, skipped): {price_only_tickers}")
+
     # Filter tweets to only available tickers
     tweets_df = tweets_df[tweets_df['ticker'].isin(available_tickers)].copy()
     print(f"  Tweets after filtering to available tickers: {len(tweets_df)}")
@@ -228,14 +262,15 @@ def load_data():
 def calculate_forward_returns(tweets_df: pd.DataFrame, price_data: Dict) -> pd.DataFrame:
     """Calculate forward returns for all tickers using high-performance vector operations."""
     print(f"  Calculating forward returns for {len(tweets_df)} tweets across {len(price_data)} tickers...")
-    
+
     # Sort tweets by time for merge_asof
     tweets_sorted = tweets_df.sort_values('entry_time').copy()
     all_returns = []
 
     horizons = [5, 15, 30, 60]
 
-    for ticker in TICKERS:
+    # Use only tickers present in price_data (not the hardcoded list)
+    for ticker in price_data.keys():
         if ticker not in price_data:
             continue
 
