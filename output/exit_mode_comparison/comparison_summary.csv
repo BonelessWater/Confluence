@@ -1,0 +1,5 @@
+Scorer,Exit Mode,Total Return (%),Num Trades,Win Rate (%),Avg Return/Trade (%),Avg Duration (min),Max Duration (min),Sharpe,Max Drawdown (%)
+correlation,event_driven,4.05,27,63.0,1.0051,29297.3,104826.6,2.018,-0.77
+correlation,fixed_time,0.11,60,45.0,0.0131,5.0,5.0,0.954,-0.08
+sentiment,event_driven,7.91,60,56.7,1.6584,38319.4,257574.3,1.377,-2.40
+sentiment,fixed_time,-0.14,156,36.5,-0.0130,5.0,5.0,-1.000,-0.31

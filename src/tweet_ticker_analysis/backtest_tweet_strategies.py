@@ -55,7 +55,8 @@ class TweetStrategyBacktester:
                  min_hour: int = 12,
                  max_hour: int = 14,
                  use_regime_detection: bool = True,
-                 use_advanced_sizing: bool = True):
+                 use_advanced_sizing: bool = True,
+                 exit_mode: str = 'event_driven'):
         """
         Initialize backtester.
 
@@ -77,7 +78,8 @@ class TweetStrategyBacktester:
         self.max_hour = max_hour
         self.use_regime_detection = use_regime_detection
         self.use_advanced_sizing = use_advanced_sizing
-        
+        self.exit_mode = exit_mode  # 'event_driven' or 'fixed_time'
+
         self.return_calculator = RealReturnCalculator()
         
         if apply_transaction_costs:
@@ -417,18 +419,63 @@ class TweetStrategyBacktester:
                         tweet_idx_in_batch = current_tweets.index.get_loc(idx) if idx in current_tweets.index else 0
                         weight = weights[tweet_idx_in_batch] if tweet_idx_in_batch < len(weights) else 0.0
 
-                    # Open position
                     exit_time = current_time + pd.Timedelta(minutes=self.holding_period_minutes)
                     meta = tweet_meta.get(idx, {})
-                    positions[ticker] = {
-                        'entry_time': current_time,
-                        'exit_time': exit_time,
-                        'weight': weight,
-                        'influence_score': influence_score,
-                        'tweet_idx': idx,
-                        'signal_reason': meta.get('signal_reasons', {}).get(ticker, ''),
-                        'tweet_snippet': meta.get('tweet_snippet', ''),
-                    }
+
+                    if self.exit_mode == 'fixed_time':
+                        # Close immediately at the scheduled exit time using real prices
+                        if ticker in price_data:
+                            gross_return = self.return_calculator.calculate_return(
+                                entry_time=current_time,
+                                exit_time=exit_time,
+                                ticker=ticker,
+                                price_df=price_data[ticker]
+                            )
+                        else:
+                            gross_return = 0.0
+
+                        if self.apply_transaction_costs:
+                            net_return = self.cost_calculator.apply_costs_to_return(gross_return, weight)
+                            transaction_cost = capital * weight * (gross_return - net_return)
+                        else:
+                            net_return = gross_return
+                            transaction_cost = 0.0
+
+                        pnl = capital * weight * net_return
+                        capital += pnl
+
+                        if self.use_advanced_sizing and self.position_sizer:
+                            self.position_sizer.update_performance({'return': net_return, 'ticker': ticker})
+
+                        trades.append({
+                            'entry_time': current_time,
+                            'exit_time': exit_time,
+                            'duration_minutes': self.holding_period_minutes,
+                            'ticker': ticker,
+                            'direction': 'LONG' if influence_score >= 0 else 'SHORT',
+                            'position_size_usd': round(capital * weight, 2),
+                            'weight': weight,
+                            'influence_score': influence_score,
+                            'signal_reason': meta.get('signal_reasons', {}).get(ticker, ''),
+                            'tweet_snippet': meta.get('tweet_snippet', ''),
+                            'gross_return': gross_return,
+                            'net_return': net_return,
+                            'transaction_cost': transaction_cost,
+                            'pnl': pnl,
+                            'capital': capital
+                        })
+                        equity_curve.append({'time': exit_time, 'equity': capital})
+                    else:
+                        # event_driven: open position, close when next tweet arrives
+                        positions[ticker] = {
+                            'entry_time': current_time,
+                            'exit_time': exit_time,
+                            'weight': weight,
+                            'influence_score': influence_score,
+                            'tweet_idx': idx,
+                            'signal_reason': meta.get('signal_reasons', {}).get(ticker, ''),
+                            'tweet_snippet': meta.get('tweet_snippet', ''),
+                        }
 
                     daily_trade_count[date][ticker] += 1
 
